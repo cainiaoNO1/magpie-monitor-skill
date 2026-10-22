@@ -1,6 +1,6 @@
 ---
 name: magpie-monitor
-description: 通过 150 服务器 (18.188.150.249) 的 SSH MCP (ssh-amazon-150) 连接 Magpie，采集分析多账号配额用量、调用汇总、单个账号请求记录、单次请求明细及耗时占比分布、实时请求路由决策与首字时间拆解。Use when the user asks to 查看 magpie 监控、账号用量、5小时/7天配额、请求明细、耗时统计与占比、首字时间或实时请求状态.
+description: 通过 150 服务器 (18.188.150.249) 的 SSH MCP (ssh-amazon-150) 连接 Magpie，采集分析多账号配额用量、调用汇总、单个账号请求记录、单次请求明细及耗时占比分布、实时请求路由决策与首字时间拆解；对比对话质量与请求质量时统一以首字耗时 (TTFT) 为口径。Use when the user asks to 查看 magpie 监控、账号用量、5小时/7天配额、请求明细、耗时统计与占比、首字时间、实时请求状态、对话质量对比、请求质量对比或首字耗时对比.
 ---
 
 # Magpie 监控与状态查询技能 (Magpie Monitor)
@@ -20,10 +20,29 @@ description: 通过 150 服务器 (18.188.150.249) 的 SSH MCP (ssh-amazon-150) 
 | **三、单个账号的请求详细列表** | 请求页（表格列表） | `magpie usage --csv --account <email> today` 或解析 `usage.jsonl` | 请求时间、模型、Tokens、耗时、状态码、会话 ID |
 | **四、单次请求明细与耗时分布** | 请求页详情展开 (图六) | 解析 `routing/<YYYY-MM-DD>.jsonl` 中的单条请求 | 网关内耗、发送耗时、供应商响应/等待、首字时间 (TTFT)、流式输出耗时及**各项占比** |
 | **五、实时请求详细信息** | 路由页【正在做出的决定】(图五) | 读取 `routing/<YYYY-MM-DD>.jsonl` 最新一条记录 | 实时命中的账号、模型、路由裁决理由、首字时间、完整的各阶段耗时比例拆解 |
+| **六、对话质量 / 请求质量对比** | 概览页 & 请求页（跨模型 / 账号 / 会话） | 聚合 `routing/<YYYY-MM-DD>.jsonl` 的 `ttft` | 按模型、账号、会话对比**首字耗时**（均值 / 中位 / P95） |
 
 ---
 
-## 五大场景标准化查询指令
+## 质量评估口径（强制）
+
+**对话质量**与**请求质量**的对比，统一以**首字耗时 (TTFT)** 为唯一主口径，**禁止使用每秒 token**。
+
+| 概念 | 定义 | 对比口径 |
+|---|---|---|
+| **请求质量** | 单次请求的首字响应表现 | 该请求的 `ttft` |
+| **对话质量** | 一次会话（`session`）内多轮请求的整体首字表现 | 该会话所有请求 `ttft` 的均值 / 中位 / P95 |
+
+规则：
+
+1. **只用首字耗时下质量结论**：平均、中位、P95、最快、最慢，全部按 `ttft` 计算。
+2. **禁止**计算或展示**每秒 token**（`tok/s`、`tokens per second`、输出速度、吞吐）作为质量指标，也不得用它给模型或账号排优劣。
+3. 总耗时 `ms` 仅作**参考**列，不参与质量判定。
+4. 单位一律**秒**，保留 2 位小数。
+
+---
+
+## 标准化查询场景
 
 全部通过 `mcp__ssh-amazon-150__execute-command` 执行。
 
@@ -121,7 +140,7 @@ for r in records[-10:]:
     model = r.get("model", "")
     inp = r.get("in", 0)
     out = r.get("out", 0)
-    ttft = r.get("ttft_ms", 0) / 1000
+    ttft = r.get("ttft_ms", r.get("ttft", 0)) / 1000
     ms = r.get("ms", 0) / 1000
     st = r.get("status", 200)
     resp_id = r.get("response_id", "")
@@ -294,6 +313,69 @@ for r in recs:
 
 ---
 
+### 场景七：对话质量 / 请求质量对比（只比首字耗时）
+
+按**模型**、**账号**或**会话**聚合当日 `routing/*.jsonl`，全部用 `ttft` 衡量质量。**不计算每秒 token。**
+
+```bash
+sudo python3 -c '
+import json, glob
+from collections import defaultdict
+
+DIM = "served"   # 可选: served(模型) / order0.who(账号) / session(会话)
+files = sorted(glob.glob("/home/ubuntu/apps/magpie/config/magpie/routing/*.jsonl"))
+if not files:
+    print("未发现路由记录")
+    exit(0)
+
+groups = defaultdict(list)
+for fp in files:
+    with open(fp) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            ttft = r.get("ttft", 0)
+            if not ttft or r.get("status", 200) >= 400:
+                continue          # 失败请求不计入质量样本
+            if DIM == "served":
+                key = r.get("served") or r.get("model") or "unknown"
+            elif DIM == "session":
+                key = r.get("session") or "unknown"
+            else:
+                o = r.get("order") or [{}]
+                key = o[0].get("who", "unknown")
+            groups[key].append(ttft)
+
+def pct(vals, p):
+    s = sorted(vals)
+    if not s:
+        return 0.0
+    k = min(len(s) - 1, int(round((len(s) - 1) * p / 100.0)))
+    return s[k]
+
+print("| 维度 | 样本数 | 首字均值(s) | 首字中位(s) | 首字P95(s) | 最快(s) | 最慢(s) |")
+print("|---|---|---|---|---|---|---|")
+rows = []
+for key, vals in groups.items():
+    avg = sum(vals) / len(vals)
+    rows.append((avg, key, vals))
+for avg, key, vals in sorted(rows):
+    print("| %s | %d | %.2f | %.2f | %.2f | %.2f | %.2f |" % (
+        key, len(vals), avg / 1000.0, pct(vals, 50) / 1000.0,
+        pct(vals, 95) / 1000.0, min(vals) / 1000.0, max(vals) / 1000.0))
+'
+```
+
+**质量结论的表述规则：**
+
+- 排序**只按首字均值**，均值小者为质量更优。
+- 对比时给出**差值**与**倍数**，例：`A 首字均值 1.20s，B 2.40s，A 快 1.20s（2.0 倍）`。
+- 样本数 < 3 时标注「样本不足，仅供参考」。
+- **禁止**出现 `tok/s`、`tokens/s`、输出速度、吞吐等每秒 token 指标。
+
+---
+
 ## 呈现规范（强制）
 
 1. **所有时间一律北京时间 (UTC+8)**，格式 `yyyy-mm-dd hh:mm:ss`。日志原始时间为 UTC，必须 `+8` 小时后再输出，并在表头标注「北京时间」。
@@ -301,3 +383,5 @@ for r in recs:
 3. 每次趋势表都必须带上 **供应商等待首字(s)** 与 **供应商总响应(s)** 两列。
 4. 耗时分解必须给出**绝对秒数**以及**相对总耗时的百分比（%）**。
 5. 纯净展示路由决策、账号命准与性能瓶颈，无需输出上下文色块分布。
+6. **对话质量 / 请求质量的对比一律以首字耗时 (TTFT) 为口径**，排序、差值、倍数全部基于首字。
+7. **禁止输出每秒 token**（`tok/s`、`tokens/s`、输出速度、吞吐）作为质量指标或用于给模型 / 账号排优劣。

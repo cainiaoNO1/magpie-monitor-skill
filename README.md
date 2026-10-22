@@ -20,10 +20,19 @@ Magpie 网关监控查询技能（DSH Agent Skill）。
 
 ## 安装到 DSH
 
-把 `SKILL.md` 复制到 DSH 用户技能目录：
+把 `SKILL.md` 复制到 DSH 用户技能目录 `~/.agents/skills/magpie-monitor/`。
+
+### Windows
 
 ```powershell
 Copy-Item .\SKILL.md "C:\Users\<你的用户名>\.agents\skills\magpie-monitor\SKILL.md" -Force
+```
+
+### macOS / Linux
+
+```bash
+mkdir -p ~/.agents/skills/magpie-monitor
+cp SKILL.md ~/.agents/skills/magpie-monitor/SKILL.md
 ```
 
 技能目录结构：
@@ -34,11 +43,16 @@ Copy-Item .\SKILL.md "C:\Users\<你的用户名>\.agents\skills\magpie-monitor\S
 
 ## 工作流约定
 
-**源码目录**：`F:\code\magpie-monitor-skill`（唯一编辑入口）
+**源码目录**（唯一编辑入口）：
+
+| 系统 | 路径 |
+|---|---|
+| Windows | `F:\code\magpie-monitor-skill` |
+| macOS | `/Users/ymj/Desktop/code/dsh/magpie-monitor-skill` |
 
 修改流程：
 
-1. 编辑 `F:\code\magpie-monitor-skill\SKILL.md`
+1. 编辑源码 `SKILL.md`
 2. `git add . && git commit -m "..." && git push`
 3. 复制到 `~/.agents/skills/magpie-monitor/SKILL.md` 使其生效
 
